@@ -7,6 +7,8 @@ Architecture:
   - Consumer: Runs in an isolated daemon thread, communicates shutdown
     via threading.Event. Subscribes to 'order-events' and dispatches
     Celery tasks based on event_type.
+  - WebSocket Bridge: Pushes consumed events to ws_notification_queue
+    for real-time client updates.
 
 This design prevents bidirectional messaging loops by keeping the
 consumer fully decoupled from the FastAPI request-response cycle.
@@ -34,7 +36,6 @@ def get_producer() -> Producer:
     global _producer
     if _producer is None:
         with _producer_lock:
-            # Double-checked locking
             if _producer is None:
                 _producer = Producer({
                     "bootstrap.servers": settings.KAFKA_SERVERS,
@@ -65,9 +66,18 @@ def publish_event(topic: str, key: str, payload: dict):
             value=json.dumps(payload).encode("utf-8"),
             callback=_delivery_report,
         )
-        p.poll(0)  # Trigger delivery callbacks
+        p.poll(0)
     except Exception as e:
         logger.error(f"Failed to produce message to '{topic}': {e}")
+
+
+def _push_to_ws_queue(event: dict):
+    """Push event to WebSocket notification queue (best-effort)."""
+    try:
+        from app.core.ws_manager import ws_notification_queue
+        ws_notification_queue.put(event)
+    except Exception:
+        pass  # Silently skip if WS manager not available
 
 
 def consume_loop():
@@ -75,14 +85,18 @@ def consume_loop():
     Background consumer loop — runs in its own daemon thread.
 
     Listens to 'order-events' and dispatches Celery tasks:
-      - order.created   -> process_payment_task
-      - payment.processed -> process_shipping_task
+      - order.created         -> process_payment_task
+      - payment.processed     -> process_shipping_task
+      - order.cancel_requested -> process_cancellation_task
+      - order.update_requested -> process_update_task
 
-    Uses manual commit (enable.auto.commit=False) so messages are only
-    committed after successful task dispatch.
+    Also pushes all events to WebSocket notification queue.
     """
-    # Deferred import to avoid circular dependency at module load time
-    from app.tasks.workflows import process_payment_task, process_shipping_task
+    from app.tasks.workflows import (
+        process_shipping_task, process_cancellation_task,
+        process_update_task, process_manual_payment_task,
+        process_delivery_task
+    )
 
     consumer = Consumer({
         "bootstrap.servers": settings.KAFKA_SERVERS,
@@ -113,11 +127,26 @@ def consume_loop():
 
                 logger.info(f"Consumed event: {event_type} for order {order_id}")
 
-                if event_type == "order.created":
-                    process_payment_task.delay(order_id)
+                # Dispatch to appropriate Celery task
+                if event_type == "payment.received":
+                    process_manual_payment_task.delay(order_id)
                 elif event_type == "payment.processed":
                     process_shipping_task.delay(order_id)
-                # order.shipped is a terminal event — no further dispatch
+                elif event_type == "order.shipped":
+                    process_delivery_task.apply_async(args=[order_id], countdown=300)
+                elif event_type == "order.cancel_requested":
+                    process_cancellation_task.delay(order_id)
+                elif event_type == "order.update_requested":
+                    process_update_task.delay(
+                        order_id,
+                        event.get("item_name"),
+                        event.get("price"),
+                    )
+                # Terminal events: order.shipped, order.cancelled, *.failed
+                # Push to WebSocket for UI updates
+
+                # Bridge all events to WebSocket clients
+                _push_to_ws_queue(event)
 
                 consumer.commit(message=msg)
             except Exception as e:
