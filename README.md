@@ -99,3 +99,13 @@ The React application will be available at `http://localhost:3000`.
 3. **Delivery Countdown**: It is assumed that "Delivery" takes a static simulated amount of time (5 minutes) after an order reaches the `SHIPPED` state. This is executed by scheduling a Celery task with a `countdown=300`.
 4. **Failure State Finality**: Once manual payment retries are exhausted and an order reaches the `FAILED` state, it is assumed this is a terminal state. No automated recovery is attempted past this point.
 5. **Security / Authentication**: It is assumed this engine operates inside a trusted VPC for administrative purposes. Authentication, Authorization, and Rate Limiting middlewares were omitted to focus purely on the architectural orchestration workflow.
+
+## Video Demonstration of the Application with explantions
+
+Click the link below to watch a comprehensive video demonstration explaining how the application works:
+
+**[Watch the Application Demo on OneDrive](https://1drv.ms/v/c/a8c50f3e5e943f0f/IQDQszGwAcv8R7w38GvUufjEAfGB0XJ_lObV6v7nnxAFRUw?e=YW4lRk)**
+
+
+
+
